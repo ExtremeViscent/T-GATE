@@ -5,4 +5,6 @@ from .SD_DeepCache import TgateSDDeepCacheLoader
 from .SDXL import TgateSDXLLoader
 from .SDXL_DeepCache import TgateSDXLDeepCacheLoader
 from .SVD import TgateSVDLoader
+from .SD3 import TgateSD3Loader
+from .ilumina import TgateIluminaLoader
 

@@ -2,10 +2,11 @@ import argparse
 import os
 import torch
 
-from tgate import TgateSDXLLoader, TgateSDXLDeepCacheLoader, TgatePixArtAlphaLoader, TgatePixArtSigmaLoader, TgateSVDLoader
-from diffusers import StableDiffusionXLPipeline, PixArtAlphaPipeline, PixArtSigmaPipeline, StableVideoDiffusionPipeline
+from tgate import TgateSDXLLoader, TgateSDXLDeepCacheLoader, TgatePixArtAlphaLoader, TgatePixArtSigmaLoader, TgateSVDLoader, TgateSD3Loader, TgateIluminaLoader
+from diffusers import StableDiffusionXLPipeline, PixArtAlphaPipeline, PixArtSigmaPipeline, StableVideoDiffusionPipeline, StableDiffusion3Pipeline, LuminaText2ImgPipeline
 from diffusers import UNet2DConditionModel, LCMScheduler
 from diffusers import DPMSolverMultistepScheduler
+from transformers import T5EncoderModel, BitsAndBytesConfig
 from diffusers.utils import load_image, export_to_video
 
 def parse_args():
@@ -33,7 +34,7 @@ def parse_args():
         "--model",
         type=str,
         default='pixart',
-        help="[pixart_alpha,pixart_sigma,sdxl,lcm_sdxl,lcm_pixart_alpha,svd]",
+        help="[pixart_alpha,pixart_sigma,sdxl,sd3,lcm_sdxl,lcm_pixart_alpha,svd]",
     )
     parser.add_argument(
         "--gate_step",
@@ -71,6 +72,12 @@ def parse_args():
         default=False, 
         help='do deep cache',
     )
+    parser.add_argument(
+        '--vanilla',
+        action='store_true',
+        default=False,
+        help='do vanilla inference',
+    )
     
     args = parser.parse_args()
     return args
@@ -79,6 +86,8 @@ def parse_args():
 if __name__ == '__main__':
     args = parse_args()
     os.makedirs(args.saved_path, exist_ok=True)
+    sd_random_seed = 42
+    generator = torch.Generator("cuda").manual_seed(sd_random_seed)
     if args.prompt:
         saved_path = os.path.join(args.saved_path, 'test.png')
     elif args.image:
@@ -90,25 +99,109 @@ if __name__ == '__main__':
             torch_dtype=torch.float16, 
             variant="fp16", 
         )
-        if args.deepcache:
-            pipe = TgateSDXLDeepCacheLoader(
-                pipe,
-                cache_interval=3,
-                cache_branch_id=0
-            )
-        else:
-            pipe = TgateSDXLLoader(pipe)
+        if not args.vanilla:
+            if args.deepcache:
+                pipe = TgateSDXLDeepCacheLoader(
+                    pipe,
+                    cache_interval=3,
+                    cache_branch_id=0
+                )
+            else:
+                pipe = TgateSDXLLoader(pipe)
         pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
         pipe = pipe.to("cuda")
+        import time
+        t0 = time.time()
+        if not args.vanilla:
+            image = pipe.tgate(
+                prompt=args.prompt,
+                gate_step=args.gate_step,
+                sp_interval=args.sp_interval if not args.deepcache else 1,
+                fi_interval=args.fi_interval,
+                warm_up=args.warm_up if not args.deepcache else 0,
+                num_inference_steps=args.inference_step,
+            ).images[0]
+        else:
+            print('Vanilla inference')
+            image = pipe(
+                prompt=args.prompt,
+                num_inference_steps=args.inference_step,
+                height=1024,
+                width=1024,
+                guidance_scale=7.0,
+            ).images[0]
 
-        image = pipe.tgate(
-            prompt=args.prompt,
-            gate_step=args.gate_step,
-            sp_interval=args.sp_interval if not args.deepcache else 1,
-            fi_interval=args.fi_interval,
-            warm_up=args.warm_up if not args.deepcache else 0,
-            num_inference_steps=args.inference_step,
-        ).images[0]
+        print('E2E time:', time.time()-t0)
+        image.save(saved_path)
+
+    elif args.model == 'sd3':
+        quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+        text_encoder = T5EncoderModel.from_pretrained(
+            "stabilityai/stable-diffusion-3-medium-diffusers",
+            subfolder="text_encoder_3",
+            quantization_config=quantization_config,
+        )
+        pipe = StableDiffusion3Pipeline.from_pretrained(
+            "stabilityai/stable-diffusion-3-medium-diffusers", 
+            torch_dtype=torch.float16,
+            text_encoder_3=text_encoder,)
+        if not args.vanilla:
+            pipe = TgateSD3Loader(pipe).to("cuda")
+        else:
+            pipe = pipe.to("cuda")
+        # pipe=pipe.to("cuda")
+
+        import time
+        t0 = time.time()
+        if not args.vanilla:
+            image = pipe.tgate(
+                prompt=args.prompt,
+                gate_step=args.gate_step,
+                sp_interval=args.sp_interval,
+                fi_interval=args.fi_interval,
+                warm_up=args.warm_up,
+                generator=generator,
+                num_inference_steps=args.inference_step,
+            ).images[0]
+        else:
+            print('Vanilla inference')
+            image = pipe(
+                prompt=args.prompt,
+                generator=generator,
+                num_inference_steps=args.inference_step,
+            ).images[0]
+        print('E2E time:', time.time()-t0)
+        image.save(saved_path)
+
+    elif args.model == 'ilumina':
+        pipe = LuminaText2ImgPipeline.from_pretrained(
+	    "Alpha-VLLM/Lumina-Next-SFT-diffusers", 
+        torch_dtype=torch.bfloat16)
+        if not args.vanilla:
+            pipe = TgateIluminaLoader(pipe).to("cuda")
+        else:
+            pipe = pipe.to("cuda")
+
+        import time
+        t0 = time.time()
+        if not args.vanilla:
+            image = pipe.tgate(
+                prompt=args.prompt,
+                gate_step=args.gate_step,
+                sp_interval=args.sp_interval,
+                fi_interval=args.fi_interval,
+                warm_up=args.warm_up,
+                generator=generator,
+                num_inference_steps=args.inference_step,
+            ).images[0]
+        else:
+            print('Vanilla inference')
+            image = pipe(
+                prompt=args.prompt,
+                generator=generator,
+                num_inference_steps=args.inference_step,
+            ).images[0]
+        print('E2E time:', time.time()-t0)
         image.save(saved_path)
 
     elif args.model == 'lcm_sdxl':

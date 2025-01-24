@@ -389,6 +389,7 @@ def tgate(
 
     # 8. Denoising loop
     num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+    # num_warmup_steps = 29
 
     # 8.1 Apply denoising_end
     if (
